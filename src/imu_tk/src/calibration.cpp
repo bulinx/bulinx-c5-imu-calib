@@ -39,7 +39,7 @@ using namespace imu_tk;
 using namespace Eigen;
 using namespace std;
 
-template <typename _T1> struct MultiPosAccResidual
+/*template <typename _T1> struct MultiPosAccResidual
 {
   MultiPosAccResidual( 
     const _T1 &g_mag, 
@@ -56,7 +56,7 @@ template <typename _T1> struct MultiPosAccResidual
       _T2(sample_(1)), 
       _T2(sample_(2)) 
     );
-
+*/
     /* Apply undistortion transform to accel measurements
          mis_mat_ <<  _T(1)   , -mis_yz  ,  mis_zy  ,
                        mis_xz ,  _T(1)   , -mis_zx  ,  
@@ -80,7 +80,7 @@ template <typename _T1> struct MultiPosAccResidual
 
      * assume body frame same as accelerometer frame, 
      * so bottom left params in the misalignment matris are set to zero */
-    CalibratedTriad_<_T2> calib_triad( 
+   /* CalibratedTriad_<_T2> calib_triad( 
       //
       // TODO: implement lower triad model here
       //
@@ -111,6 +111,113 @@ template <typename _T1> struct MultiPosAccResidual
   const _T1 g_mag_;
   const Eigen::Matrix< _T1, 3 , 1> sample_;
 };
+*/
+
+/*创造CaliAccCostFunction类，继承自SizedCostFunction，其中residual为常数，
+parameter为(S_xz，S_xy，S_yx，K1，K2，K3，b_x，b_y，b_z)共九个，因此SizedCostFunction大小为<1，9>*/
+template <typename _T1>
+class CaliAccCostFunction : public ceres::SizedCostFunction<1, 9> {
+  public:
+
+    //CaliAccCostFunction(const double &g_mag_, const Eigen::Matrix< double, 3 , 1> &sample_);
+    CaliAccCostFunction(const _T1 &g_mag_, const Eigen::Matrix< _T1, 3 , 1> &sample_)
+      : g_mag(g_mag_), sample(sample_) {}
+
+    virtual ~CaliAccCostFunction() {}
+
+    virtual bool Evaluate(double const *const *parameters, double *residuals, double **jacobians) const{
+
+      Eigen::Matrix<double, 3, 1> raw_samp( 
+        double(sample(0)), 
+        double(sample(1)), 
+        double(sample(2)) 
+      );
+
+      CalibratedTriad_<double> calib_triad( 
+        //
+        // TODO: implement lower triad model here
+        //
+        // mis_yz, mis_zy, mis_zx:
+        //params[0], params[1], params[2],
+        double(0), double(0), double(0),
+
+        // mis_xz,         mis_xy,          mis_yx:
+        //_T2(0), _T2(0), _T2(0),
+        parameters[0][0], parameters[0][1], parameters[0][2],
+
+        //    s_x,    s_y,    s_z:
+        parameters[0][3], parameters[0][4], parameters[0][5], 
+        //    b_x,    b_y,    b_z: 
+        parameters[0][6], parameters[0][7], parameters[0][8] 
+      );
+
+      // apply undistortion transform:
+      Eigen::Matrix< double, 3 , 1> calib_samp = calib_triad.unbiasNormalize( raw_samp );
+    
+      //residuals[0] = _T2 (g_mag_) - calib_samp.norm();
+      residuals[0] = double (g_mag) * double (g_mag) - calib_samp.norm() * calib_samp.norm();
+
+      if(jacobians != NULL){
+
+        if(jacobians[0] != NULL)
+        {
+          double s1 = parameters[0][0];
+          double s2 = parameters[0][1];
+          double s3 = parameters[0][2];
+
+
+          double k1 = parameters[0][3];
+          double k2 = parameters[0][4];
+          double k3 = parameters[0][5];
+
+          double b1 = parameters[0][6];
+          double b2 = parameters[0][7];
+          double b3 = parameters[0][8];
+
+          double a1 = sample(0);
+          double a2 = sample(1);
+          double a3 = sample(2);
+
+	/*按照公式mis_mat_的正负号求的雅克比矩阵*/
+          Eigen::Matrix<double, 3, 3> mis_mat;
+          mis_mat<< 
+            1,        0,       0,
+            s1,   1,       0,
+           -s2,  s3,   1;
+          
+          Eigen::Matrix<double, 3, 3> scale_mat;
+          scale_mat<<
+            k1,    0,       0,
+            0,      k2,     0,
+            0,      0,      k3;
+          
+          Eigen::Vector3d bias_vec = {a1 - b1, a2 - b2, a3 - b3};
+          Eigen::Vector3d a_vec = mis_mat * scale_mat * bias_vec;
+          Eigen::Matrix<double, 3, 9> delta;
+
+          delta <<
+            0,                       0,               0,                     a1 - b1,               0,                    0,            -k1,          0,              0,
+            k1 * (a1 - b1),       0,               0,                s1 * (a1 - b1),     a2 - b2,                0,        -s1 * k1,   -k2,             0,
+            0,              -k1 * (a1 - b1),   k2 * (a2 - b2),   -s2 * (a1 - b1),   s3 * (a2 - b2),   (a3 - b3),   s2 * k1,  -s3 * k2,   -k3;
+        
+          Eigen::Map<Eigen::Matrix<double, 1, 9, Eigen::RowMajor> > J_se3(jacobians[0]);
+          J_se3.setZero();
+
+          //J_se3 = -2 * a_vec.transpose() * delta; 
+          J_se3 = -2 * calib_samp.transpose() * delta; 
+
+        }
+      }
+      return true;
+    }
+
+    const _T1 g_mag;
+    const Eigen::Matrix< _T1, 3 , 1> sample;
+
+};
+
+
+
 
 template <typename _T1> struct MultiPosGyroResidual
 {
@@ -218,10 +325,14 @@ bool MultiPosCalibration_<_T>::calibrateAcc(
     //
     // TODO: implement lower triad model here
     //
-    acc_calib_params[0] = init_acc_calib_.misYZ();
-    acc_calib_params[1] = init_acc_calib_.misZY();
-    acc_calib_params[2] = init_acc_calib_.misZX();
+    //acc_calib_params[0] = init_acc_calib_.misYZ();
+    //acc_calib_params[1] = init_acc_calib_.misZY();
+   // acc_calib_params[2] = init_acc_calib_.misZX();
     
+    acc_calib_params[0] = init_acc_calib_.misXZ();
+    acc_calib_params[1] = init_acc_calib_.misXY();
+    acc_calib_params[2] = init_acc_calib_.misYX();
+
     acc_calib_params[3] = init_acc_calib_.scaleX();
     acc_calib_params[4] = init_acc_calib_.scaleY();
     acc_calib_params[5] = init_acc_calib_.scaleZ();
@@ -250,10 +361,21 @@ bool MultiPosCalibration_<_T>::calibrateAcc(
     
     if( verbose_output_) cout<<"Trying calibrate... "<<endl;
     
-    ceres::Problem problem;
+
+    double parameters[9] = {0, 0, 0, 1, 1, 1, 0, 0, 0};
+
+    //ceres::LossFunction *loss_function = new ceres::HuberLoss(0.1);
+    ceres::LossFunction *loss_function = NULL;
+    ceres::Problem::Options problem_options;
+    ceres::Problem problem(problem_options);
+
+
+    problem.AddParameterBlock(parameters, 9);
+
+    //ceres::Problem problem;
     for( int i = 0; i < static_samples.size(); i++)
     {
-      ceres::CostFunction* cost_function = MultiPosAccResidual<_T>::Create ( 
+      ceres::CostFunction* cost_function = new CaliAccCostFunction<_T> ( 
         g_mag_, static_samples[i].data() 
       );
 
@@ -291,10 +413,11 @@ bool MultiPosCalibration_<_T>::calibrateAcc(
     //
     // TODO: implement lower triad model here
     // 
+    0,0,0,
     min_cost_calib_params[0],
     min_cost_calib_params[1],
     min_cost_calib_params[2],
-    0,0,0,
+    
     min_cost_calib_params[3],
     min_cost_calib_params[4],
     min_cost_calib_params[5],
